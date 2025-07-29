@@ -40,25 +40,49 @@ def generate_csv(request):
 
 def search_page(request):
     if request.method == 'POST':
-        query = request.POST.get('query', '').strip()
-        id_list = [mid.strip().lower() for mid in query.split(',') if mid.strip()]
+        raw = request.POST.get('query', '').strip()
+        # Split into [message_id, port, ip]
+        parts = raw.split(';')
+        msg_part  = parts[0].strip() if len(parts) > 0 else ''
+        port_part = parts[1].strip() if len(parts) > 1 else ''
+        ip_part   = parts[2].strip() if len(parts) > 2 else ''
+
+        # Build filters
+        msg_ids   = [m.lower() for m in msg_part.split(',') if m] if msg_part else []
+        port_filt = port_part or None
+        ip_filt   = ip_part   or None
 
         results = []
         with open(CSV_PATH, newline='') as csvfile:
             reader = csv.DictReader(csvfile)
             header = reader.fieldnames
             for row in reader:
-                row_id = row.get('message_id', '').strip().lower()
-                if row_id in id_list:
-                    results.append(SimpleNamespace(**row))
+                # message_id filter
+                mid = row.get('message_id', '').lower()
+                if msg_ids and mid not in msg_ids:
+                    continue
+
+                # extract submit_src = "ip:port"
+                src = row.get('submit_src', '')
+                src_ip, src_port = (src.split(':') + ['',''])[:2]
+
+                # port filter
+                if port_filt and src_port != port_filt:
+                    continue
+                # ip filter
+                if ip_filt and src_ip != ip_filt:
+                    continue
+
+                results.append(SimpleNamespace(**row))
 
         return render(request, 'search.html', {
             'results': results,
             'header': header,
-            'query': query
+            'query': raw
         })
 
     return render(request, 'search.html')
+
 
 def download_csv(request):
     file_path = 'smpp_full_chains.csv'

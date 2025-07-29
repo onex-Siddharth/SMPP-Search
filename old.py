@@ -14,18 +14,33 @@ logger = logging.getLogger(__name__)
 # Configure TShark path
 pyshark.tshark.tshark.get_tshark_path = lambda: '/usr/bin/tshark'
  
+import pyshark
+import pandas as pd
+import struct
+from datetime import datetime
+import os
+import glob
+import sys
+import asyncio
+import logging
+import re
+
+# REMOVE THIS LINE (it causes logger misbehavior)
+# logger = logging.getLogger(__name__)
+
 def setup_logging():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler('smpp_analysis.log'),
+            logging.FileHandler('smpp_analysis.log', mode='w'),
             logging.StreamHandler()
         ]
     )
     return logging.getLogger()
- 
+
 logger = setup_logging()
+
  
 def clean_payload(raw):
     if isinstance(raw, list):
@@ -134,6 +149,9 @@ def parse_pdu(pdu_bytes, pkt_info):
     }
  
 def main():
+    import time
+    parsing_start = time.perf_counter()
+
     # Directory handling
     dir_path = sys.argv[1] if len(sys.argv) > 1 else '.'
     pcap_files = sorted([f for f in glob.glob(os.path.join(dir_path, '*.pcap*')) if os.path.isfile(f)])
@@ -141,7 +159,7 @@ def main():
     if not pcap_files:
         logger.error(f"No PCAP files found in {dir_path}")
         sys.exit(1)
- 
+
     # Data structures
     submit_sm = {}
     submit_sm_resp = {}
@@ -150,7 +168,7 @@ def main():
     msgid_to_deliver = {}
     all_records = []
     chain_records = []
- 
+
     counters = {
         'submit_sm': 0,
         'submit_sm_resp': 0,
@@ -161,7 +179,7 @@ def main():
         'deliver_resp_matched': 0,
         'full_chains': 0
     }
- 
+
     # Process each PCAP
     for file in pcap_files:
         logger.info(f"Processing: {file}")
@@ -182,11 +200,11 @@ def main():
                     raw_payload = getattr(pkt.tcp, 'segment_data', None) or getattr(pkt.tcp, 'payload', None)
                     if not raw_payload:
                         continue
-                        
+
                     payload_hex = clean_payload(raw_payload)
                     if not payload_hex:
                         continue
- 
+
                     pkt_info = {
                         'src_ip': pkt.ip.src,
                         'dst_ip': pkt.ip.dst,
@@ -194,15 +212,15 @@ def main():
                         'dst_port': pkt.tcp.dstport,
                         'timestamp': datetime.fromtimestamp(float(pkt.sniff_timestamp)).strftime('%d/%m/%y %H:%M:%S')
                     }
- 
+
                     for pdu in extract_pdus(payload_hex):
                         rec = parse_pdu(pdu, pkt_info)
                         if not rec:
                             continue
-                            
+
                         all_records.append(rec)
                         key = (rec['sequence_number'], rec['src_ip'], rec['src_port'], rec['dst_ip'], rec['dst_port'])
-                        
+
                         if rec['command_id'] == '0x00000004':
                             submit_sm[key] = rec
                             counters['submit_sm'] += 1
@@ -217,21 +235,30 @@ def main():
                         elif rec['command_id'] == '0x80000005':
                             deliver_sm_resp[key] = rec
                             counters['deliver_sm_resp'] += 1
-                            
+
                 except Exception as e:
                     logger.warning(f"Packet error: {e}")
                     
             cap.close()
             loop.close()
-            
+            logger.info("All packets parsed successfully.")
+
         except Exception as e:
             logger.error(f"File error: {e}")
- 
-    # Enhanced matching logic
-    logger.info("\nMatching Debug:")
+
+    parsing_end = time.perf_counter()
+    logger.info(f"🔍 Packet parsing time: {parsing_end - parsing_start:.2f} seconds")
+
+    # Matching
+    
+        # … after parsing_end and before matching_end …
+
+    # Matching
+    matching_start = time.perf_counter()
+    logger.info("\n🔗 Matching Debug:")
     logger.info(f"Submit_SM_Resp IDs: {len(submit_sm_resp)}")
     logger.info(f"Deliver_SM IDs: {len(msgid_to_deliver)}")
-    
+
     for sub_key, sub in submit_sm.items():
         rev_key = (sub_key[0], sub_key[3], sub_key[4], sub_key[1], sub_key[2])
         resp = submit_sm_resp.get(rev_key)
@@ -239,82 +266,81 @@ def main():
         dkey = None
         drec = None
         dresp = None
-        
+
         if resp:
             counters['submit_resp_matched'] += 1
             mid = resp['message_id']
-            
+
             if mid and mid in msgid_to_deliver:
-                # Find all deliver_sm with matching message_id
                 possible_deliveries = msgid_to_deliver[mid]
-                
-                # First try to find deliver_sm with matching IPs (regardless of ports)
                 for dk, dr in possible_deliveries:
-                    if (dk[1] == rev_key[3] and dk[3] == rev_key[1]):  # Reverse IP direction
+                    if (dk[1] == rev_key[3] and dk[3] == rev_key[1]):
                         logger.info(f"Found potential deliver_sm match for MID {mid}")
-                        dkey = dk
-                        drec = dr
-                        
-                        # Verify the deliver_sm contains the expected source/dest addresses
+                        dkey, drec = dk, dr
                         if drec['originator_addr'] and drec['recipient_addr']:
-                            logger.info(f"Confirmed deliver_sm match with addresses: {drec['originator_addr']} -> {drec['recipient_addr']}")
+                            logger.info(f"Confirmed deliver_sm match: {drec['originator_addr']} -> {drec['recipient_addr']}")
                             counters['resp_deliver_matched'] += 1
-                            
-                            # Look for deliver_sm_resp
                             dr_key = (dk[0], dk[3], dk[4], dk[1], dk[2])
                             dresp = deliver_sm_resp.get(dr_key)
                             if dresp:
-                                logger.info(f"Found complete chain for MID {mid}")
+                                logger.info(f"Full chain for MID {mid}")
                                 counters['deliver_resp_matched'] += 1
                                 counters['full_chains'] += 1
-                            break
-                
-                # If no match found with IPs, try any deliver_sm with matching message_id
+                        break
+
                 if not dkey and possible_deliveries:
                     dkey, drec = possible_deliveries[0]
                     logger.warning(f"Using first deliver_sm for MID {mid} without IP verification")
                     counters['resp_deliver_matched'] += 1
-                    
-                    # Look for deliver_sm_resp
                     dr_key = (dkey[0], dkey[3], dkey[4], dkey[1], dkey[2])
                     dresp = deliver_sm_resp.get(dr_key)
                     if dresp:
                         counters['deliver_resp_matched'] += 1
                         counters['full_chains'] += 1
- 
-        # Add to chain records with full port information
+
         chain_records.append({
-            'submit_sm_seq': sub_key[0],
-            'submit_time': sub['timestamp'],
-            'submit_src': f"{sub['src_ip']}:{sub['src_port']}",
-            'submit_dst': f"{sub['dst_ip']}:{sub['dst_port']}",
-            'submit_resp_seq': resp['sequence_number'] if resp else '',
-            'submit_resp_time': resp['timestamp'] if resp else '',
-            'submit_resp_src': f"{resp['src_ip']}:{resp['src_port']}" if resp else '',
-            'submit_resp_dst': f"{resp['dst_ip']}:{resp['dst_port']}" if resp else '',
-            'message_id': mid or '',
-            'originator_addr': drec['originator_addr'] if drec else '',  # Changed from source_addr
-            'recipient_addr': drec['recipient_addr'] if drec else '',  # Changed from destination_addr
-            'message_content': drec['short_message'] if drec else '',
-            'deliver_seq': dkey[0] if dkey else '',
-            'deliver_time': drec['timestamp'] if drec else '',
-            'deliver_src': f"{drec['src_ip']}:{drec['src_port']}" if drec else '',
-            'deliver_dst': f"{drec['dst_ip']}:{drec['dst_port']}" if drec else '',
-            'deliver_resp_seq': dresp['sequence_number'] if dresp else '',
-            'deliver_resp_time': dresp['timestamp'] if dresp else '',
-            'deliver_resp_src': f"{dresp['src_ip']}:{dresp['src_port']}" if dresp else '',
-            'deliver_resp_dst': f"{dresp['dst_ip']}:{dresp['dst_port']}" if dresp else ''
+            'submit_sm_seq':      sub_key[0],
+            'submit_time':        sub['timestamp'],
+            'submit_src':         f"{sub['src_ip']}:{sub['src_port']}",
+            'submit_dst':         f"{sub['dst_ip']}:{sub['dst_port']}",
+            'submit_resp_time':   resp['timestamp'] if resp else '',
+            'submit_resp_src':    f"{resp['src_ip']}:{resp['src_port']}" if resp else '',
+            'submit_resp_dst':    f"{resp['dst_ip']}:{resp['dst_port']}" if resp else '',
+            'message_id':         mid or '',
+            'originator_addr':    drec['originator_addr'] if drec else '',
+            'recipient_addr':     drec['recipient_addr'] if drec else '',
+            'message_content':    drec['short_message'] if drec else '',
+            'deliver_seq':        dkey[0] if dkey else '',
+            'deliver_time':       drec['timestamp'] if drec else '',
+            'deliver_src':        f"{drec['src_ip']}:{drec['src_port']}" if drec else '',
+            'deliver_dst':        f"{drec['dst_ip']}:{drec['dst_port']}" if drec else '',
+            'deliver_resp_time':  dresp['timestamp'] if dresp else '',
+            'deliver_resp_src':   f"{dresp['src_ip']}:{dresp['src_port']}" if dresp else '',
+            'deliver_resp_dst':   f"{dresp['dst_ip']}:{dresp['dst_port']}" if dresp else ''
         })
- 
+
+    matching_end = time.perf_counter()
+    logger.info(f"🧠 Matching time: {matching_end - matching_start:.2f} seconds")
+
     # Save results
     pd.DataFrame(all_records).to_csv("all_smpp_packets.csv", index=False)
     pd.DataFrame(chain_records).to_csv("smpp_full_chains.csv", index=False)
     pd.DataFrame([counters]).to_csv("smpp_stats_summary.csv", index=False)
- 
-    logger.info("\nFinal Counters:")
+
+    logger.info("\n📊 Final Counters:")
     for k, v in counters.items():
         logger.info(f"{k}: {v}")
- 
+
+    logger.info(f"✅ Total time (parse + match): {(matching_end - parsing_start):.2f} seconds")
+
 if __name__ == "__main__":
+    
+
+    start_time = datetime.now()
+
     main()
+    end_time = datetime.now()
+    logger.info(f"Total processing time: {end_time - start_time}")
+
+ 
  
