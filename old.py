@@ -8,7 +8,11 @@ import sys
 import asyncio
 import logging
 import re
- 
+from datetime import datetime, timezone, timedelta
+
+# define IST tz
+IST = timezone(timedelta(hours=5, minutes=30))
+
 logger = logging.getLogger(__name__)
  
 # Configure TShark path
@@ -46,7 +50,7 @@ def clean_payload(raw):
     if isinstance(raw, list):
         raw = ''.join(raw)
     return raw.replace(':', '').replace(' ', '').strip()
- 
+
 def extract_pdus(payload_hex):
     pdus = []
     try:
@@ -62,92 +66,101 @@ def extract_pdus(payload_hex):
         logger.warning(f"PDU extraction error: {e}")
     return pdus
 
+ 
 def parse_pdu(pdu_bytes, pkt_info):
+    """
+    Turn a raw SMPP PDU into a dict.  We now handle:
+      - 0x00000004 (Submit_SM): extract originator/recipient
+      - 0x80000004 (Submit_SM_Resp): extract msg_id
+      - 0x00000005 (Deliver_SM): your existing logic (we leave it alone)
+    """
     if len(pdu_bytes) < 16:
         return None
- 
+
     # common header
     cmd = f"0x{struct.unpack('!I', pdu_bytes[4:8])[0]:08x}"
     seq = str(struct.unpack('!I', pdu_bytes[12:16])[0])
- 
-    # prepare outputs
+
+    # fields we may fill
     msg_id = None
-    source_addr = None
-    destination_addr = None
+    originator_addr = None
+    recipient_addr = None
     short_message = None
- 
+
+    body = pdu_bytes[16:]
+    off = 0
+
     try:
-        # Submit_SM_Resp → simple null‑terminated msg_id
-        if cmd == '0x80000004':
-            null_pos = pdu_bytes.find(b'\x00', 16)
-            if null_pos != -1:
-                msg_id = pdu_bytes[16:null_pos].decode('utf-8', 'ignore').strip().lower()
- 
-        # Deliver_SM → byte‑by‑byte parse per SMPP spec
-        elif cmd == '0x00000005':
-            body = pdu_bytes[16:]
-            off = 0
- 
-            # 1) skip service_type C‑string
+        # ── Submit_SM ── (0x00000004)
+        if cmd == '0x00000004':
+            # 1) skip service_type (C‑string)
             off = body.find(b'\x00', off) + 1
- 
             # 2) skip source_addr_ton + source_addr_npi
             off += 2
- 
-            # 3) read source_addr (C‑string = MSISDN)
+            # 3) read originator address (C‑string)
             end = body.find(b'\x00', off)
-            source_addr = body[off:end].decode('ascii', 'ignore')
+            originator_addr = body[off:end].decode('ascii','ignore')
             off = end + 1
- 
             # 4) skip dest_addr_ton + dest_addr_npi
             off += 2
- 
-            # 5) read destination_addr (C‑string = alphanumeric)
+            # 5) read recipient address (C‑string)
             end = body.find(b'\x00', off)
-            destination_addr = body[off:end].decode('ascii', 'ignore')
+            recipient_addr = body[off:end].decode('ascii','ignore')
+            # we don’t need the rest here (no msg_id in Submit_SM)
+
+        # ── Submit_SM_Resp ── (0x80000004)
+        elif cmd == '0x80000004':
+            null_pos = body.find(b'\x00', 0)
+            if null_pos != -1:
+                msg_id = body[:null_pos].decode('utf-8','ignore').strip().lower()
+
+        # ── Deliver_SM ── (0x00000005)
+        elif cmd == '0x00000005':
+            # … your existing 0x00000005 parsing, untouched …
+            off = 0
+            off = body.find(b'\x00', off) + 1    # service_type
+            off += 2                              # ton/npi
+            end = body.find(b'\x00', off)        # source_addr
+            _src = body[off:end].decode('ascii','ignore')
             off = end + 1
- 
-            # 6) skip esm_class, protocol_id, priority_flag
-            off += 3
- 
-            # 7) skip schedule_delivery_time C‑string
-            off = body.find(b'\x00', off) + 1
- 
-            # 8) skip validity_period C‑string
-            off = body.find(b'\x00', off) + 1
- 
-            # 9) skip registered_delivery, replace_if_present_flag,
-            #    data_coding, sm_default_msg_id (4 bytes)
-            off += 4
- 
-            # 10) read short_message: length byte + message bytes
+            off += 2                              # ton/npi
+            end = body.find(b'\x00', off)        # destination_addr
+            _dst = body[off:end].decode('ascii','ignore')
+            off = end + 1
+            off += 3                              # esm_class, protocol_id, priority
+            off = body.find(b'\x00', off) + 1    # schedule_delivery_time
+            off = body.find(b'\x00', off) + 1    # validity_period
+            off += 4                              # flags + coding
             sm_len = body[off]
             off += 1
-            short_message = body[off:off + sm_len].decode('utf-8', 'ignore')
- 
-            # Extract delivery receipt's internal ID
-            if short_message:
-                m = re.search(r'id:([^\s;]+)', short_message, re.IGNORECASE)
-                if m:
-                    msg_id = m.group(1).strip().lower()
- 
+            short_message = body[off:off + sm_len].decode('utf-8','ignore')
+            # extract id:… from receipt if present
+            m = re.search(r'id:([^\s;]+)', short_message or '', re.IGNORECASE)
+            if m:
+                msg_id = m.group(1).strip().lower()
+            # (we no longer use _src/_dst here for originator_addr/recipient_addr)
+
+        # ── Deliver_SM_Resp or anything else ──
+        else:
+            pass
+
     except Exception as e:
         logger.error(f"PDU parsing error (cmd={cmd}): {e}")
- 
+
     return {
-        'command_id':       cmd,
-        'sequence_number':  seq,
-        'message_id':       msg_id,
-        'originator_addr': source_addr,  # Changed from source_addr
-        'recipient_addr':  destination_addr,  # Changed from destination_addr
-        'short_message':    short_message,
-        'src_ip':           pkt_info['src_ip'],
-        'src_port':         pkt_info['src_port'],
-        'dst_ip':           pkt_info['dst_ip'],
-        'dst_port':         pkt_info['dst_port'],
-        'timestamp':        pkt_info['timestamp']
+        'command_id':      cmd,
+        'sequence_number': seq,
+        'message_id':      msg_id,
+        'originator_addr': originator_addr,
+        'recipient_addr':  recipient_addr,
+        'short_message':   short_message,
+        'src_ip':          pkt_info['src_ip'],
+        'src_port':        pkt_info['src_port'],
+        'dst_ip':          pkt_info['dst_ip'],
+        'dst_port':        pkt_info['dst_port'],
+        'timestamp':       pkt_info['timestamp']
     }
- 
+
 def main():
     import time
     parsing_start = time.perf_counter()
@@ -206,12 +219,16 @@ def main():
                         continue
 
                     pkt_info = {
-                        'src_ip': pkt.ip.src,
-                        'dst_ip': pkt.ip.dst,
-                        'src_port': pkt.tcp.srcport,
-                        'dst_port': pkt.tcp.dstport,
-                        'timestamp': datetime.fromtimestamp(float(pkt.sniff_timestamp)).strftime('%d/%m/%y %H:%M:%S')
-                    }
+    'src_ip':   pkt.ip.src,
+    'dst_ip':   pkt.ip.dst,
+    'src_port': pkt.tcp.srcport,
+    'dst_port': pkt.tcp.dstport,
+    'timestamp': datetime
+        .fromtimestamp(float(pkt.sniff_timestamp), timezone.utc)
+        .astimezone(IST)
+        .strftime('%d/%m/%y %H:%M:%S')
+}
+
 
                     for pdu in extract_pdus(payload_hex):
                         rec = parse_pdu(pdu, pkt_info)
@@ -307,8 +324,8 @@ def main():
             'submit_resp_src':    f"{resp['src_ip']}:{resp['src_port']}" if resp else '',
             'submit_resp_dst':    f"{resp['dst_ip']}:{resp['dst_port']}" if resp else '',
             'message_id':         mid or '',
-            'originator_addr':    drec['originator_addr'] if drec else '',
-            'recipient_addr':     drec['recipient_addr'] if drec else '',
+            'recipient_addr':  sub['recipient_addr']  or '',
+            'originator_addr': sub['originator_addr'] or '',
             'message_content':    drec['short_message'] if drec else '',
             'deliver_seq':        dkey[0] if dkey else '',
             'deliver_time':       drec['timestamp'] if drec else '',
