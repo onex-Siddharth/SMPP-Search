@@ -9,6 +9,31 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
+import csv
+import os
+import shutil
+
+# Base directory where socket CSVs and full CSV are stored
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SOCKET_DIR = os.path.join(BASE_DIR, 'socket_csvs')
+FULL_CSV = os.path.join(BASE_DIR, 'smpp_full_chains.csv')
+SOCKET_SUMMARY = os.path.join(BASE_DIR, 'socket_summary.csv')
+
+# Clean up old files
+if os.path.exists(FULL_CSV):
+    os.remove(FULL_CSV)
+
+if os.path.exists(SOCKET_SUMMARY):
+    os.remove(SOCKET_SUMMARY)
+
+if os.path.exists(SOCKET_DIR):
+    for f in os.listdir(SOCKET_DIR):
+        if f.endswith('.csv'):
+            os.remove(os.path.join(SOCKET_DIR, f))
+else:
+    os.makedirs(SOCKET_DIR)
+
 
 # define IST tz
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -148,6 +173,7 @@ def parse_pdu(pdu_bytes, pkt_info):
         logger.error(f"PDU parsing error (cmd={cmd}): {e}")
 
     return {
+        'packet_no':       pkt_info['packet_no'],
         'command_id':      cmd,
         'sequence_number': seq,
         'message_id':      msg_id,
@@ -159,6 +185,7 @@ def parse_pdu(pdu_bytes, pkt_info):
         'dst_ip':          pkt_info['dst_ip'],
         'dst_port':        pkt_info['dst_port'],
         'timestamp':       pkt_info['timestamp']
+
     }
 
 def main():
@@ -226,7 +253,9 @@ def main():
     'timestamp': datetime
         .fromtimestamp(float(pkt.sniff_timestamp), timezone.utc)
         .astimezone(IST)
-        .strftime('%d/%m/%y %H:%M:%S')
+        .strftime('%d/%m/%y %H:%M:%S'),
+    'packet_no': pkt.number
+
 }
 
 
@@ -316,6 +345,11 @@ def main():
                         counters['full_chains'] += 1
 
         chain_records.append({
+            'packet_no_submit': sub.get('packet_no', ''),
+            'packet_no_submit_resp': resp.get('packet_no', '') if resp else '',
+            'packet_no_deliver': drec.get('packet_no', '') if drec else '',
+            'packet_no_deliver_resp': dresp.get('packet_no', '') if dresp else '',
+
             'submit_sm_seq':      sub_key[0],
             'submit_time':        sub['timestamp'],
             'submit_src':         f"{sub['src_ip']}:{sub['src_port']}",
@@ -336,19 +370,81 @@ def main():
             'deliver_resp_dst':   f"{dresp['dst_ip']}:{dresp['dst_port']}" if dresp else ''
         })
 
-    matching_end = time.perf_counter()
+        matching_end = time.perf_counter()
     logger.info(f"🧠 Matching time: {matching_end - matching_start:.2f} seconds")
+
+    # ── Socket Summary Stats ──
+    stats = defaultdict(lambda: {
+        'total_submit':0,
+        'matched_submit_resp':0,
+        'unmatched_submit_resp':0,
+        'matched_deliver':0,
+        'unmatched_deliver':0,
+        'matched_deliver_resp':0,
+        'unmatched_deliver_resp':0,
+    })
+
+    for chain in chain_records:
+        key = (chain['submit_src'], chain['submit_dst'])
+        st  = stats[key]
+        st['total_submit'] += 1
+        if chain['submit_resp_time']:
+            st['matched_submit_resp'] += 1
+        else:
+            st['unmatched_submit_resp'] += 1
+
+        if chain['deliver_seq']:
+            st['matched_deliver'] += 1
+            if chain['deliver_resp_time']:
+                st['matched_deliver_resp'] += 1
+            else:
+                st['unmatched_deliver_resp'] += 1
+        else:
+            st['unmatched_deliver'] += 1
+            st['unmatched_deliver_resp'] += 1
+
+    # Write socket_summary.csv
+    with open('socket_summary.csv','w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            'submit_src','submit_dst',
+            'total_submit',
+            'matched_submit_resp','unmatched_submit_resp',
+            'matched_deliver','unmatched_deliver',
+            'matched_deliver_resp','unmatched_deliver_resp'
+        ])
+        for (src,dst), st in stats.items():
+            writer.writerow([
+                src, dst,
+                st['total_submit'],
+                st['matched_submit_resp'], st['unmatched_submit_resp'],
+                st['matched_deliver'],     st['unmatched_deliver'],
+                st['matched_deliver_resp'],st['unmatched_deliver_resp']
+            ])
 
     # Save results
     pd.DataFrame(all_records).to_csv("all_smpp_packets.csv", index=False)
     pd.DataFrame(chain_records).to_csv("smpp_full_chains.csv", index=False)
     pd.DataFrame([counters]).to_csv("smpp_stats_summary.csv", index=False)
+    os.makedirs('socket_csvs', exist_ok=True)
+    chains_by_socket = defaultdict(list)
 
-    logger.info("\n📊 Final Counters:")
+    for chain in chain_records:
+        key = (chain['submit_src'], chain['submit_dst'])
+        chains_by_socket[key].append(chain)
+
+    for (submit_src, submit_dst), records in chains_by_socket.items():
+        src_clean = submit_src.replace(":", "_")
+        dst_clean = submit_dst.replace(":", "_")
+        fname = f"chains_{src_clean}__{dst_clean}.csv"
+        out_path = os.path.join('socket_csvs', fname)
+
+        pd.DataFrame(records).to_csv(out_path, index=False)
+        logger.info(f"💾 Wrote socket chain CSV: {out_path}")
+    logger.info("\\n📊 Final Counters:")
     for k, v in counters.items():
         logger.info(f"{k}: {v}")
 
-    logger.info(f"✅ Total time (parse + match): {(matching_end - parsing_start):.2f} seconds")
 
 if __name__ == "__main__":
     

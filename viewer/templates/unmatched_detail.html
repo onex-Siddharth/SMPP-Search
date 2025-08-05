@@ -1,0 +1,78 @@
+{% load custom_tags %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background-color: #f9f9f9;
+            color: #333;
+        }
+        h1, h2 {
+            color: #2c3e50;
+        }
+        h1 { font-size: 28px; margin-bottom: 20px; }
+        h2 { margin-top: 40px; font-size: 22px; }
+
+        table {
+            width: 100%; border-collapse: collapse; margin-top: 20px;
+            background-color: white; box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        }
+        th, td {
+            border: 1px solid #ddd; padding: 12px 14px;
+            text-align: left; font-size: 14px;
+        }
+        th {
+            background-color: #4CAF50; color: white;
+            position: sticky; top: 0; z-index: 1;
+        }
+        tr:hover { background-color: #f1f1f1; }
+        .no-results {
+            margin-top: 30px; font-size: 16px; color: #888;
+        }
+        a {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 16px;
+            background-color: #4CAF50;
+            color: white;
+            border-radius: 4px;
+            text-decoration: none;
+        }
+        a:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <h1>{{ title }}</h1>
+
+    {% if results %}
+        <table>
+            <thead>
+                <tr>
+                    {% for col in header %}
+                        <th>{{ col }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in results %}
+                    <tr>
+                        {% for col in header %}
+                            <td>{{ row|get_attr:col }}</td>
+                        {% endfor %}
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <div class="no-results">No unmatched records found.</div>
+    {% endif %}
+
+    <a href="{% url 'search_page' %}">⬅ Back to Search</a>
+</body>
+</html>
