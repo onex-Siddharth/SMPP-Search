@@ -148,3 +148,36 @@ def unmatched_view(request, src_ip_port, dst_ip_port, pdu_type):
         'header' : header,
         'title'  : f"Unmatched {pdu_type.replace('_',' ').title()} for {src_ip_port} → {dst_ip_port}"
     })
+
+@csrf_exempt
+def upload_pcap(request):
+    if request.method == 'POST' and request.FILES.get('pcap_file'):
+        uploaded_file = request.FILES['pcap_file']
+        upload_dir    = os.path.join(BASE_DIR, 'uploaded_pcaps')
+        os.makedirs(upload_dir, exist_ok=True)
+
+        # Save uploaded file
+        file_path = os.path.join(upload_dir, uploaded_file.name)
+        with open(file_path, 'wb') as f:
+            for chunk in uploaded_file.chunks():
+                f.write(chunk)
+
+        # Run old.py on uploaded directory
+        script_path = os.path.join(BASE_DIR, 'old.py')
+        cmd = ['python3', script_path, upload_dir]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True
+            )
+            messages.success(request, f"✅ File uploaded and CSV generated!\n{result.stdout}")
+        except subprocess.CalledProcessError as e:
+            messages.error(request, f"❌ Error processing file:\n{e.stderr}")
+
+        return HttpResponseRedirect(reverse('search_page'))
+
+    messages.error(request, "❌ No file selected.")
+    return HttpResponseRedirect(reverse('search_page'))

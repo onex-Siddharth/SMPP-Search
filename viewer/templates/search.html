@@ -17,7 +17,7 @@
         h1 { font-size: 28px; margin-bottom: 20px; }
         h2 { margin-top: 40px; font-size: 22px; }
         form { margin-bottom: 20px; }
-        input[type="text"] {
+        input[type="text"], input[type="file"] {
             padding: 10px; width: 320px; font-size: 16px;
             border: 1px solid #ccc; border-radius: 4px;
         }
@@ -71,6 +71,13 @@
         {% endfor %}
     {% endif %}
 
+    <!-- Upload PCAP Form -->
+    <form method="post" action="{% url 'upload_pcap' %}" enctype="multipart/form-data">
+        {% csrf_token %}
+        <input type="file" name="pcap_file" accept=".pcap,.pcapng" required>
+        <button type="submit">Upload PCAP</button>
+    </form>
+
     <!-- Generate CSV -->
     <form method="post" action="{% url 'generate_csv' %}">
         {% csrf_token %}
@@ -100,7 +107,6 @@
                     <tr>
                         {% for col in header %}
                             <td>{{ row|get_attr:col }}</td>
-
                         {% endfor %}
                     </tr>
                 {% endfor %}
@@ -119,7 +125,6 @@
 
     <!-- Socket Summary Section -->
     {% if show_summary and socket_stats %}
-
         <h2>Socket Summary</h2>
         <table>
             <thead>

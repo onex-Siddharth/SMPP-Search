@@ -9,7 +9,7 @@ alias deactivate 'test $?_OLD_VIRTUAL_PATH != 0 && setenv PATH "$_OLD_VIRTUAL_PA
 # Unset irrelevant variables.
 deactivate nondestructive
 
-setenv VIRTUAL_ENV '/home/siddharth.sharma@onextel.com/SMPP project/Smpp_loss/venv'
+setenv VIRTUAL_ENV '/home/siddharth.sharma@onextel.com/SMPP project/test/SMPP-Search/venv'
 
 set _OLD_VIRTUAL_PATH="$PATH"
 setenv PATH "$VIRTUAL_ENV/"bin":$PATH"
