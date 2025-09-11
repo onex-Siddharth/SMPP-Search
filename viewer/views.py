@@ -21,8 +21,14 @@ def generate_csv(request):
         dir_input   = request.POST.get('dir_input', '').strip()
         script_path = os.path.join(BASE_DIR, 'old.py')
         cmd         = ['python3', script_path]
+
         if dir_input:
             cmd.append(dir_input)
+        else:
+            # Default: use uploaded_pcaps folder
+            upload_dir = os.path.join(BASE_DIR, 'uploaded_pcaps')
+            os.makedirs(upload_dir, exist_ok=True)
+            cmd.append(upload_dir)
 
         try:
             result = subprocess.run(
@@ -32,16 +38,14 @@ def generate_csv(request):
                 text=True,
                 check=True
             )
-            messages.success(request, f"✅ CSV generated successfully!\n{result.stdout}")
+            messages.success(request, f" CSV generated successfully!\n{result.stdout}")
         except subprocess.CalledProcessError as e:
-            messages.error(request, f"❌ Error generating CSV:\n{e.stderr}")
+            messages.error(request, f" Error generating CSV:\n{e.stderr}")
 
-        # Redirect to search_page with the flag so socket summary shows
         return HttpResponseRedirect('/?generated=1')
 
-
-    # If someone GETs this URL, just go back
     return HttpResponseRedirect(reverse('search_page'))
+
 
 
 def search_page(request):
@@ -149,21 +153,20 @@ def unmatched_view(request, src_ip_port, dst_ip_port, pdu_type):
         'title'  : f"Unmatched {pdu_type.replace('_',' ').title()} for {src_ip_port} → {dst_ip_port}"
     })
 
+
 @csrf_exempt
 def upload_pcap(request):
     if request.method == 'POST' and request.FILES.get('pcap_file'):
         uploaded_file = request.FILES['pcap_file']
-        upload_dir    = os.path.join(BASE_DIR, 'uploaded_pcaps')
+        upload_dir    = os.path.join(settings.BASE_DIR, 'uploaded_pcaps')
         os.makedirs(upload_dir, exist_ok=True)
 
-        # Save uploaded file
         file_path = os.path.join(upload_dir, uploaded_file.name)
         with open(file_path, 'wb') as f:
             for chunk in uploaded_file.chunks():
                 f.write(chunk)
 
-        # Run old.py on uploaded directory
-        script_path = os.path.join(BASE_DIR, 'old.py')
+        script_path = os.path.join(settings.BASE_DIR, 'old.py')
         cmd = ['python3', script_path, upload_dir]
         try:
             result = subprocess.run(
@@ -173,11 +176,43 @@ def upload_pcap(request):
                 text=True,
                 check=True
             )
-            messages.success(request, f"✅ File uploaded and CSV generated!\n{result.stdout}")
+            messages.success(request, f"File uploaded and CSV generated!\n{result.stdout}")
         except subprocess.CalledProcessError as e:
-            messages.error(request, f"❌ Error processing file:\n{e.stderr}")
+            messages.error(request, f"Error processing file:\n{e.stderr}")
 
         return HttpResponseRedirect(reverse('search_page'))
 
-    messages.error(request, "❌ No file selected.")
+    messages.error(request, "No file selected.")
     return HttpResponseRedirect(reverse('search_page'))
+
+@csrf_exempt
+def delete_pcaps(request):
+    if request.method == "POST":
+        upload_dir = os.path.join(settings.BASE_DIR, 'uploaded_pcaps')
+        deleted_files = []
+        error_files = []
+
+        if os.path.exists(upload_dir):
+            for fname in os.listdir(upload_dir):
+                fpath = os.path.join(upload_dir, fname)
+                if os.path.isfile(fpath):
+                    # Check for standard extensions OR the specific dump.pcap pattern
+                    if (fname.endswith(".pcap") or 
+                        fname.endswith(".pcapng") or 
+                        fname.startswith("dump.pcap")):  # Match the new pattern
+                        try:
+                            os.remove(fpath)
+                            deleted_files.append(fname)
+                        except Exception as e:
+                            error_msg = f"Error deleting {fname}: {e}"
+                            messages.error(request, error_msg)
+                            error_files.append(fname)
+
+        if deleted_files:
+            messages.success(request, f"🗑️ Deleted {len(deleted_files)} PCAP file(s): {', '.join(deleted_files)}")
+        else:
+            messages.info(request, "No PCAP files found to delete.")
+
+    return HttpResponseRedirect(reverse('search_page'))
+
+

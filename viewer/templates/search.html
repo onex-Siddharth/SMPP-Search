@@ -77,6 +77,11 @@
         <input type="file" name="pcap_file" accept=".pcap,.pcapng" required>
         <button type="submit">Upload PCAP</button>
     </form>
+    <!-- Delete All PCAPs Button -->
+    <form method="post" action="{% url 'delete_pcaps' %}" style="display:inline-block; margin-left:10px;">
+    {% csrf_token %}
+    <button type="submit" style="background-color:#e74c3c;">Delete All PCAPs</button>
+</form>
 
     <!-- Generate CSV -->
     <form method="post" action="{% url 'generate_csv' %}">

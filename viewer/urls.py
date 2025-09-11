@@ -4,6 +4,7 @@ from . import views
 urlpatterns = [
     path('', views.search_page, name='search_page'),
     path('upload/', views.upload_pcap, name='upload_pcap'),
+    path("delete_pcaps/", views.delete_pcaps, name="delete_pcaps"),
     path('generate/', views.generate_csv, name='generate_csv'),
     path('download/csv/', views.download_csv, name='download_csv'),
     path('download/socket/<str:filename>/', views.download_socket_csv, name='download_socket_csv'),
